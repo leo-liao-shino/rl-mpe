@@ -1,0 +1,14 @@
+name: rl-mpe
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - pettingzoo==1.24.3
+      - gymnasium==0.29.1
+      - numpy==1.26.4
+      - pygame==2.6.1
+      - torch==2.9.0
+  - wandb==0.17.9

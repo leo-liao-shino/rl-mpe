@@ -1,0 +1,135 @@
+{
+    "os": "Linux-6.14.0-36-generic-x86_64-with-glibc2.39",
+    "python": "3.12.12",
+    "heartbeatAt": "2025-11-30T10:09:54.256571",
+    "startedAt": "2025-11-30T10:09:54.196628",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "simple_reference_v3",
+        "--episodes",
+        "2",
+        "--episodes-per-log",
+        "1",
+        "--eval-episodes",
+        "0",
+        "--wandb-mode",
+        "dryrun",
+        "--log-dir",
+        "runs/logs",
+        "--summary-file",
+        "runs/summary.jsonl"
+    ],
+    "state": "running",
+    "program": "-m mpe_env_setup.train_cli",
+    "codePathLocal": null,
+    "host": "lawrence-ubuntu",
+    "username": "lawrence",
+    "executable": "/home/lawrence/miniconda3/envs/rl-mpe/bin/python",
+    "cpu_count": 8,
+    "cpu_count_logical": 16,
+    "cpu_freq": {
+        "current": 5224.7669375,
+        "min": 2985.0,
+        "max": 5271.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 5229.911,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5226.369,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5223.724,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5216.323,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5191.189,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5226.666,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5225.248,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5204.936,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5225.336,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5228.453,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5224.342,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5226.245,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5224.538,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5222.037,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5186.575,
+            "min": 2985.0,
+            "max": 5271.0
+        },
+        {
+            "current": 5225.394,
+            "min": 2985.0,
+            "max": 5271.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 195.8027114868164,
+            "used": 77.49023056030273
+        }
+    },
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA GeForce RTX 5080",
+            "memory_total": 17094934528
+        }
+    ],
+    "memory": {
+        "total": 30.509376525878906
+    }
+}

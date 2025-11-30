@@ -1,0 +1,23 @@
+[
+  {
+    "env_name": "simple_reference_v3",
+    "steps_taken": 4,
+    "reward_totals": {
+      "agent_0": -1.7184072909710417,
+      "agent_1": -1.4810281892776145
+    },
+    "num_agents": 2,
+    "observation_shapes": {
+      "agent_0": [
+        21
+      ],
+      "agent_1": [
+        21
+      ]
+    },
+    "action_space_types": {
+      "agent_0": "Discrete",
+      "agent_1": "Discrete"
+    }
+  }
+]
