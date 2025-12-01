@@ -11,4 +11,4 @@ dependencies:
       - numpy==1.26.4
       - pygame==2.6.1
       - torch==2.9.0
-  - wandb==0.17.9
+      - wandb==0.17.9
