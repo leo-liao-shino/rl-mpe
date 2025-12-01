@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import numpy as np
@@ -59,7 +60,7 @@ class IndependentPolicyTrainer:
         device: DeviceLike = None,
         entropy_coef: float = 0.01,
         grad_clip: Optional[float] = 0.5,
-        baseline_momentum: float = 0.95,
+        baseline_momentum: Optional[float] = 0.95,
     ) -> None:
         if env_name not in PRESET_SPECS:
             raise KeyError(
@@ -81,6 +82,45 @@ class IndependentPolicyTrainer:
         self.possible_agents: List[str] = []
         self.running_baselines: Dict[str, float] = {}
         self._initialize_models()
+
+    def load_checkpoints(
+        self, checkpoint_dir: Path, *, strict: bool = True
+    ) -> Dict[str, Path]:
+        """Load the most recent checkpoint per agent from a directory.
+
+        Args:
+            checkpoint_dir: Directory containing files saved via `_save_checkpoint`.
+            strict: When True, raise `FileNotFoundError` if any agent is missing.
+
+        Returns:
+            Mapping from agent name to the checkpoint path that was loaded.
+        """
+
+        checkpoint_dir = Path(checkpoint_dir)
+        if not checkpoint_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory '{checkpoint_dir}' does not exist")
+
+        episode_pattern = re.compile(r"_ep(\d+)\.pt$")
+        loaded: Dict[str, Path] = {}
+
+        def _episode_num(path: Path) -> int:
+            match = episode_pattern.search(path.name)
+            return int(match.group(1)) if match else -1
+
+        for agent in self.possible_agents:
+            matches = sorted(checkpoint_dir.glob(f"*_{agent}_ep*.pt"))
+            if not matches:
+                if strict:
+                    raise FileNotFoundError(
+                        f"No checkpoint files for agent '{agent}' in '{checkpoint_dir}'"
+                    )
+                continue
+            best_path = max(matches, key=lambda p: (_episode_num(p), p.stat().st_mtime))
+            state = torch.load(best_path, map_location=self.device)
+            self.models[agent].load_state_dict(state)
+            loaded[agent] = best_path
+
+        return loaded
 
     def _initialize_models(self) -> None:
         env = build_parallel_mpe_env(self.env_name)

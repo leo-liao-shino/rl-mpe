@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,13 @@ import torch
 
 from .env_factory import PRESET_SPECS, build_parallel_mpe_env
 from .trainers import EpisodeStats, IndependentPolicyTrainer
+
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API",
+    category=UserWarning,
+    module="pygame.pkgdata",
+)
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional directory to store per-agent checkpoints.",
+    )
+    parser.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="Directory containing per-agent checkpoints to load before training.",
     )
     parser.add_argument(
         "--seed",
@@ -440,6 +454,13 @@ def main() -> None:
             grad_clip=settings.grad_clip,
             baseline_momentum=settings.baseline_momentum,
         )
+        if args.init_from:
+            loaded_paths = trainer.load_checkpoints(args.init_from)
+            if loaded_paths:
+                loaded_summary = ", ".join(
+                    f"{agent}:{path.name}" for agent, path in loaded_paths.items()
+                )
+                print(f"[{env_name}] Loaded checkpoints -> {loaded_summary}")
         try:
             history = trainer.train(
                 episodes=settings.episodes,
