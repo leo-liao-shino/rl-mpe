@@ -153,6 +153,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing per-agent checkpoints to load before training.",
     )
     parser.add_argument(
+        "--init-comm-from",
+        type=Path,
+        default=None,
+        help="Directory containing checkpoints whose communication heads should seed training.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -192,6 +198,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="Number of greedy evaluation rollouts to run after training (0 to skip).",
+    )
+    parser.add_argument(
+        "--freeze-comm-head",
+        action="store_true",
+        help="Keep communication heads fixed (useful when transferring language).",
+    )
+    parser.add_argument(
+        "--freeze-move-head",
+        action="store_true",
+        help="Keep movement heads fixed during fine-tuning.",
     )
     parser.add_argument(
         "--wandb-mode",
@@ -387,8 +403,7 @@ def _evaluate_policy(
                     obs_tensor = torch.as_tensor(
                         obs[agent], dtype=torch.float32, device=trainer.device
                     )
-                    dist = trainer.models[agent](obs_tensor)
-                    action = int(dist.probs.argmax().item())
+                    action = trainer._greedy_policy_action(agent, obs_tensor)
                     actions[agent] = action
                 obs, rewards, terminations, truncations, _ = env.step(actions)
                 for agent in actions:
@@ -461,6 +476,21 @@ def main() -> None:
                     f"{agent}:{path.name}" for agent, path in loaded_paths.items()
                 )
                 print(f"[{env_name}] Loaded checkpoints -> {loaded_summary}")
+        if args.init_comm_from:
+            comm_paths = trainer.load_checkpoints(
+                args.init_comm_from, strict=False, component="comm_head"
+            )
+            if comm_paths:
+                summary = ", ".join(f"{agent}:{path.name}" for agent, path in comm_paths.items())
+                print(f"[{env_name}] Seeded comm heads -> {summary}")
+        if args.freeze_comm_head or args.freeze_move_head:
+            trainer.freeze_heads(move=args.freeze_move_head, comm=args.freeze_comm_head)
+            frozen = []
+            if args.freeze_comm_head:
+                frozen.append("communication")
+            if args.freeze_move_head:
+                frozen.append("movement")
+            print(f"[{env_name}] Freezing {' & '.join(frozen)} heads")
         try:
             history = trainer.train(
                 episodes=settings.episodes,

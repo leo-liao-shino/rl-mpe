@@ -12,3 +12,5 @@ dependencies:
       - pygame==2.6.1
       - torch==2.9.0
       - wandb==0.17.9
+      - tqdm
+      - matplotlib==3.9.2

@@ -5,22 +5,71 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import re
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from .env_factory import PRESET_SPECS, MPEEnvironmentSpec, build_parallel_mpe_env
+from .env_factory import (
+    PRESET_SPECS,
+    MPEEnvironmentSpec,
+    build_mpe_env,
+    build_parallel_mpe_env,
+)
 
 DeviceLike = Optional[str]
 
 
-class PolicyNetwork(nn.Module):
-    """Simple MLP policy producing categorical action distributions."""
+@dataclass(frozen=True)
+class PolicyOutput:
+    move_dist: Optional[Categorical]
+    comm_dist: Optional[Categorical]
 
-    def __init__(self, input_dim: int, action_dim: int, hidden_sizes: Iterable[int]):
+
+@dataclass(frozen=True)
+class AgentActionLayout:
+    move_dim: int
+    comm_dim: int
+
+    @property
+    def has_comm(self) -> bool:
+        return self.comm_dim > 0
+
+    @property
+    def action_space_n(self) -> int:
+        move_choices = max(1, self.move_dim)
+        comm_choices = max(1, self.comm_dim)
+        return move_choices * comm_choices
+
+    def flatten(self, move_idx: int, comm_idx: Optional[int] = None) -> int:
+        move_choices = max(1, self.move_dim)
+        if move_idx >= move_choices or move_idx < 0:
+            raise ValueError(
+                f"Move index {move_idx} outside valid range [0, {move_choices})"
+            )
+        if not self.has_comm:
+            return move_idx
+        if comm_idx is None:
+            raise ValueError("Communication index is required for communicative agents")
+        if comm_idx < 0 or comm_idx >= self.comm_dim:
+            raise ValueError(
+                f"Comm index {comm_idx} outside valid range [0, {self.comm_dim})"
+            )
+        return move_idx * self.comm_dim + comm_idx
+
+
+class PolicyNetwork(nn.Module):
+    """MLP policy with separate movement and communication heads."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        move_dim: int,
+        comm_dim: int,
+        hidden_sizes: Iterable[int],
+    ) -> None:
         super().__init__()
         layers: List[nn.Module] = []
         prev = input_dim
@@ -28,12 +77,27 @@ class PolicyNetwork(nn.Module):
             layers.append(nn.Linear(prev, hidden))
             layers.append(nn.ReLU())
             prev = hidden
-        layers.append(nn.Linear(prev, action_dim))
-        self.model = nn.Sequential(*layers)
+        self.body = nn.Sequential(*layers) if layers else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> Categorical:
-        logits = self.model(x)
-        return Categorical(logits=logits)
+        move_out = max(1, move_dim)
+        self.move_head = nn.Linear(prev, move_out)
+        self.move_dim = move_out
+
+        self.comm_dim = comm_dim
+        if comm_dim > 0:
+            self.comm_head = nn.Linear(prev, comm_dim)
+        else:
+            self.comm_head = None
+
+    def forward(self, x: torch.Tensor) -> PolicyOutput:
+        hidden = self.body(x)
+        move_logits = self.move_head(hidden)
+        move_dist = Categorical(logits=move_logits)
+        comm_dist = None
+        if self.comm_head is not None:
+            comm_logits = self.comm_head(hidden)
+            comm_dist = Categorical(logits=comm_logits)
+        return PolicyOutput(move_dist=move_dist, comm_dist=comm_dist)
 
 
 @dataclass
@@ -81,20 +145,29 @@ class IndependentPolicyTrainer:
         self.optimizers: Dict[str, torch.optim.Optimizer] = {}
         self.possible_agents: List[str] = []
         self.running_baselines: Dict[str, float] = {}
+        self.action_layouts: Dict[str, AgentActionLayout] = {}
         self._initialize_models()
 
     def load_checkpoints(
-        self, checkpoint_dir: Path, *, strict: bool = True
+        self,
+        checkpoint_dir: Path,
+        *,
+        strict: bool = True,
+        component: str = "all",
     ) -> Dict[str, Path]:
         """Load the most recent checkpoint per agent from a directory.
 
         Args:
             checkpoint_dir: Directory containing files saved via `_save_checkpoint`.
             strict: When True, raise `FileNotFoundError` if any agent is missing.
+            component: Which parameters to load ("all" or "comm_head").
 
         Returns:
             Mapping from agent name to the checkpoint path that was loaded.
         """
+
+        if component not in {"all", "comm_head"}:
+            raise ValueError("component must be 'all' or 'comm_head'")
 
         checkpoint_dir = Path(checkpoint_dir)
         if not checkpoint_dir.exists():
@@ -117,12 +190,47 @@ class IndependentPolicyTrainer:
                 continue
             best_path = max(matches, key=lambda p: (_episode_num(p), p.stat().st_mtime))
             state = torch.load(best_path, map_location=self.device)
-            self.models[agent].load_state_dict(state)
+            model = self.models[agent]
+            if component == "all":
+                model.load_state_dict(state)
+            else:  # comm_head only
+                if model.comm_head is None:
+                    if strict:
+                        raise ValueError(
+                            f"Agent '{agent}' has no communication head; cannot load comm weights"
+                        )
+                    continue
+                current = model.state_dict()
+                updated = False
+                for key, value in state.items():
+                    if key.startswith("comm_head"):
+                        current[key] = value
+                        updated = True
+                if updated:
+                    model.load_state_dict(current)
             loaded[agent] = best_path
 
         return loaded
 
+    def freeze_heads(self, *, move: bool = False, comm: bool = False) -> None:
+        for model in self.models.values():
+            if move:
+                for param in model.move_head.parameters():
+                    param.requires_grad = False
+            if comm and model.comm_head is not None:
+                for param in model.comm_head.parameters():
+                    param.requires_grad = False
+
     def _initialize_models(self) -> None:
+        raw_env = build_mpe_env(self.env_name)
+        world = getattr(raw_env.unwrapped, "world", None)
+        world_dim_c = int(getattr(world, "dim_c", 0) or 0) if world else 0
+        agent_traits: Dict[str, Any] = {}
+        if world:
+            for agent in getattr(world, "agents", []):
+                agent_traits[getattr(agent, "name", str(agent))] = agent
+        raw_env.close()
+
         env = build_parallel_mpe_env(self.env_name)
         self.possible_agents = list(env.possible_agents)
         for agent in self.possible_agents:
@@ -134,11 +242,61 @@ class IndependentPolicyTrainer:
                 raise ValueError(
                     f"Agent '{agent}' in {self.env_name} does not expose a discrete action space"
                 )
-            model = PolicyNetwork(obs_dim, action_dim, self.hidden_sizes).to(self.device)
+
+            traits = agent_traits.get(agent, None)
+            silent = bool(getattr(traits, "silent", False)) if traits else False
+            comm_dim = world_dim_c if (world_dim_c > 0 and not silent) else 0
+            if comm_dim > 0:
+                move_dim = max(1, action_dim // comm_dim)
+            else:
+                move_dim = action_dim
+            layout = AgentActionLayout(move_dim=move_dim, comm_dim=comm_dim)
+            if layout.action_space_n != action_dim:
+                raise ValueError(
+                    f"Action space mismatch for agent '{agent}': env={action_dim}, layout={layout.action_space_n}"
+                )
+            self.action_layouts[agent] = layout
+
+            model = PolicyNetwork(obs_dim, move_dim, comm_dim, self.hidden_sizes).to(self.device)
             optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
             self.models[agent] = model
             self.optimizers[agent] = optimizer
         env.close()
+
+    def _sample_policy_action(
+        self, agent: str, obs_tensor: torch.Tensor
+    ) -> Tuple[int, torch.Tensor, torch.Tensor]:
+        layout = self.action_layouts[agent]
+        output = self.models[agent](obs_tensor)
+
+        log_prob = torch.zeros((), dtype=torch.float32, device=self.device)
+        entropy = torch.zeros((), dtype=torch.float32, device=self.device)
+
+        move_action = output.move_dist.sample()
+        log_prob = log_prob + output.move_dist.log_prob(move_action)
+        entropy = entropy + output.move_dist.entropy()
+        move_idx = int(move_action.item())
+
+        comm_idx: Optional[int] = None
+        if output.comm_dist is not None:
+            comm_action = output.comm_dist.sample()
+            log_prob = log_prob + output.comm_dist.log_prob(comm_action)
+            entropy = entropy + output.comm_dist.entropy()
+            comm_idx = int(comm_action.item())
+
+        action_idx = layout.flatten(move_idx, comm_idx)
+        return action_idx, log_prob, entropy
+
+    def _greedy_policy_action(self, agent: str, obs_tensor: torch.Tensor) -> int:
+        layout = self.action_layouts[agent]
+        output = self.models[agent](obs_tensor)
+        move_idx = int(output.move_dist.probs.argmax().item())
+        comm_idx = (
+            int(output.comm_dist.probs.argmax().item())
+            if output.comm_dist is not None
+            else None
+        )
+        return layout.flatten(move_idx, comm_idx)
 
     def train(
         self,
@@ -168,12 +326,15 @@ class IndependentPolicyTrainer:
                 actions = {}
                 for agent in env.agents:
                     agent_obs = obs[agent]
-                    obs_tensor = torch.as_tensor(agent_obs, dtype=torch.float32, device=self.device)
-                    dist = self.models[agent](obs_tensor)
-                    action = dist.sample()
-                    actions[agent] = int(action.item())
-                    trajectories[agent]["log_probs"].append(dist.log_prob(action))
-                    trajectories[agent]["entropies"].append(dist.entropy())
+                    obs_tensor = torch.as_tensor(
+                        agent_obs, dtype=torch.float32, device=self.device
+                    )
+                    action_idx, log_prob, entropy = self._sample_policy_action(
+                        agent, obs_tensor
+                    )
+                    actions[agent] = action_idx
+                    trajectories[agent]["log_probs"].append(log_prob)
+                    trajectories[agent]["entropies"].append(entropy)
 
                 obs, rewards, terminations, truncations, _ = env.step(actions)
 

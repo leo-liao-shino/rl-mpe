@@ -104,6 +104,44 @@ PYTHONPATH=src python -m mpe_env_setup.train_cli all \
 
 `--training-plan best` overrides the core hyperparameters per environment (episode count, learning rate, network width/depth, entropy bonus, gradient clipping, and baseline momentum). You will see a console line such as `simple_world_comm_v3 Using tuned recipe...` so you know which settings were applied.
 
+### 🚀 Kicking off transfer-learning experiments
+
+The trainer now keeps movement and communication heads separate for every agent, so you can reuse the "language" learned in one scenario while fine-tuning the movement policy in another. The CLI exposes three new flags to help:
+
+| Flag | Purpose |
+| --- | --- |
+| `--init-comm-from <dir>` | Load only the communication-head weights from a checkpoint directory (movement weights stay at their current initialization). |
+| `--freeze-comm-head` | Disable gradient updates to the communication head—useful when you want to keep the transferred language fixed. |
+| `--freeze-move-head` | Freeze the movement head instead (handy for the reverse experiment). |
+
+A typical workflow looks like this:
+
+1. **Train the source environment** and save checkpoints:
+   ```bash
+   PYTHONPATH=src python -m mpe_env_setup.train_cli simple_reference_v3 \
+       --training-plan best \
+       --episodes 800 --episodes-per-log 20 \
+       --checkpoint-dir checkpoints/simple_reference_src
+   ```
+
+2. **Seed just the communication head** when moving to the target environment, optionally freezing it to measure pure transfer:
+   ```bash
+   PYTHONPATH=src python -m mpe_env_setup.train_cli simple_world_comm_v3 \
+       --training-plan best \
+       --init-comm-from checkpoints/simple_reference_src \
+       --freeze-comm-head \
+       --checkpoint-dir checkpoints/world_from_reference \
+       --log-dir runs/logs --summary-file runs/summary.jsonl
+   ```
+
+3. **Compare against baselines** by running the same command without `--init-comm-from` (scratch) or with `--init-from` to reuse the whole policy. Because movement and communication heads are separate, you can mix-and-match these options to test hypotheses such as "Does reusing language alone improve sample efficiency?".
+
+Evaluation tips:
+
+- Use `--eval-episodes` (e.g., 25) to record greedy rollout performance at the end of every run.
+- Plot the JSONL logs in `runs/logs` to compare learning curves (episodes vs. mean return).
+- When `--freeze-comm-head` is enabled, the console prints `Freezing communication heads` so you can trace the exact configuration later.
+
 ### Tracking with Weights & Biases
 
 The CLI now speaks Weights & Biases (wandb) for experiment tracking. Set the desired logging mode (`online`, `offline`, or `dryrun`) and provide your project metadata:
