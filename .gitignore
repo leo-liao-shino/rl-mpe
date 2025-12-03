@@ -1,0 +1,21 @@
+# Python cache and virtualenv artifacts
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+
+# Training outputs and checkpoints
+checkpoints/
+runs/logs/
+runs/summary*.jsonl
+wandb/
+plots/
+rollout_summary.json
+
+# Model weights
+*.pt
+
+# Misc transient files
+*.log
+
+docs/

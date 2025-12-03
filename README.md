@@ -81,11 +81,28 @@ PYTHONPATH=src python -m mpe_env_setup.train_cli simple_reference_v3 --episodes 
 PYTHONPATH=src python -m mpe_env_setup.train_cli simple_world_comm_v3 --episodes 200 --hidden 256 256 128
 ```
 
+To switch on the new actor-critic baseline (value head + Generalized Advantage Estimation), add `--algorithm actor-critic` and optionally tune its specific knobs:
+
+```bash
+PYTHONPATH=src python -m mpe_env_setup.train_cli simple_reference_v3 \
+    --training-plan best --algorithm actor-critic \
+    --policy-lr 3e-4 --value-lr 5e-4 \
+    --gae-lambda 0.9 --value-loss-coef 1.0 --normalize-rewards \
+    --auto-entropy-target 1.5 --auto-entropy-lr 5e-4 \
+    --checkpoint-dir checkpoints/simple_reference_actor_critic
+```
+
 Important flags:
 
 - `--hidden`, `--lr`, `--gamma`: control the shared policy networks and optimizer.
 - `--episodes-per-log`: cadence for console logging and checkpoint dumps.
 - `--entropy-coef`, `--grad-clip`, `--baseline-momentum`: stability knobs (entropy bonus, gradient clipping, EMA reward baseline).
+- `--algorithm {reinforce,actor-critic}`: toggle between the original REINFORCE baseline and the new actor-critic variant (default: `reinforce`).
+- `--gae-lambda`, `--value-loss-coef`: actor-critic–specific knobs (Generalized Advantage Estimation decay and critic loss weight, respectively).
+- `--policy-lr`, `--value-lr`: optionally decouple the actor vs. critic learning rates (defaults fall back to `--lr`).
+- `--normalize-rewards`: normalize per-episode rewards before computing returns/advantages to cut variance.
+- `--auto-entropy-target`, `--auto-entropy-lr`, `--min-entropy-coef`: enable automatic entropy-coefficient tuning when running the actor-critic trainer.
+- `--language-arch {simple,encdec}`: switch between the original single-projection communication head and a new encoder-decoder variant for language experiments.
 - `--device` + `--require-cuda`: choose CPU/GPU execution and optionally enforce CUDA-only training.
 - `--log-dir` + `--summary-file`: persist per-episode JSON lines and append coarse summaries for later analysis.
 - `--eval-episodes`: number of greedy evaluation rollouts to run after training (set `0` to skip).
@@ -141,6 +158,7 @@ Evaluation tips:
 - Use `--eval-episodes` (e.g., 25) to record greedy rollout performance at the end of every run.
 - Plot the JSONL logs in `runs/logs` to compare learning curves (episodes vs. mean return).
 - When `--freeze-comm-head` is enabled, the console prints `Freezing communication heads` so you can trace the exact configuration later.
+- Toggle `--language-arch encdec` (and the same flag on `scripts/run_transfer_experiments.py`) to benchmark the new encoder-decoder communication head against the original single projection without changing any other hyperparameters.
 
 ### Tracking with Weights & Biases
 
@@ -156,6 +174,30 @@ PYTHONPATH=src python -m mpe_env_setup.train_cli simple_reference_v3 \
 ```
 
 Use `--wandb-mode offline` when you want to log locally and sync later (`wandb login` is still required once). Each environment run generates its own W&B run with config metadata plus streaming episode metrics (`train/mean_return`, per-agent returns, evaluation scores, etc.).
+
+Before running in `online` or `offline` mode, authenticate once on the machine:
+
+```bash
+wandb login                  # opens browser flow
+# or, for headless environments
+WANDB_API_KEY=... wandb login --relogin
+```
+
+The transfer orchestrator (`scripts/run_transfer_experiments.py`) now forwards the same W&B settings to every job. Example dry-run showing a real online configuration:
+
+```bash
+python scripts/run_transfer_experiments.py \
+    --checkpoint-root checkpoints/new_full_run \
+    --log-dir runs/logs \
+    --summary-file runs/summary_transfer.jsonl \
+    --device cuda --freeze-comm-head --eval-from-best \
+    --wandb-mode online --wandb-project rl-mpe --wandb-group transfer \
+    --wandb-run-prefix nov2 \
+    --wandb-tags reference transfer curriculum \
+    --dry-run
+```
+
+Each generated training command now includes `--wandb-*` flags so the runs stream directly to the specified project (grouped under the optional prefix/tag metadata). Remove `--dry-run` once you are satisfied with the queue.
 
 ## GPU acceleration
 

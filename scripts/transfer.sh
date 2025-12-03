@@ -1,0 +1,12 @@
+python scripts/run_transfer_experiments.py \
+  --checkpoint-root checkpoints/new_full_run \
+  --log-dir runs/logs \
+  --summary-file runs/summary_transfer.jsonl \
+  --training-plan-source best --training-plan-target best \
+  --language-arch encdec \
+  --device cuda --eval-from-best \
+  --wandb-mode online --wandb-project rl-mpe \
+  --wandb-group transfer-encdec --wandb-run-prefix encdec-test \
+  --wandb-tags reference transfer encdec \
+  --source-episodes 800 \
+  --target-episodes 1200

@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from .env_factory import PRESET_SPECS, build_parallel_mpe_env
-from .trainers import EpisodeStats, IndependentPolicyTrainer
+from .trainers import EpisodeStats, IndependentPolicyTrainer, ActorCriticTrainer
 
 warnings.filterwarnings(
     "ignore",
@@ -56,24 +56,28 @@ DEFAULT_LOG_INTERVAL = 10
 DEFAULT_ENTROPY_COEF = 0.01
 DEFAULT_GRAD_CLIP = 0.5
 DEFAULT_BASELINE = 0.95
+DEFAULT_GAE_LAMBDA = 0.95
+DEFAULT_VALUE_COEF = 0.5
+DEFAULT_AUTO_ENTROPY_LR = 1e-3
+DEFAULT_MIN_ENTROPY_COEF = 1e-4
 
 
 BEST_TRAINING_RECIPES = {
     "simple_reference_v3": TrainingSettings(
         episodes=800,
-        lr=5e-4,
+        lr=3e-4,
         gamma=0.98,
         hidden=[256, 256],
         log_interval=20,
-        entropy_coef=0.02,
+        entropy_coef=0.005,
         grad_clip=0.5,
-        baseline_momentum=0.97,
+        baseline_momentum=0.99,
     ),
     "simple_world_comm_v3": TrainingSettings(
         episodes=1200,
         lr=3e-4,
         gamma=0.995,
-        hidden=[256, 256, 128],
+        hidden=[256, 256],
         log_interval=25,
         entropy_coef=0.015,
         grad_clip=0.7,
@@ -117,6 +121,12 @@ def parse_args() -> argparse.Namespace:
     help=f"Hidden layer sizes for the policy networks (default: {DEFAULT_HIDDEN}).",
     )
     parser.add_argument(
+        "--language-arch",
+        choices=["simple", "encdec"],
+        default="simple",
+        help="Architecture for the communication head. 'encdec' adds a decoder MLP before logits.",
+    )
+    parser.add_argument(
         "--entropy-coef",
         type=float,
     default=None,
@@ -133,6 +143,59 @@ def parse_args() -> argparse.Namespace:
         type=float,
     default=None,
     help=f"EMA factor for the running reward baseline; set <=0 to disable (default: {DEFAULT_BASELINE}).",
+    )
+    parser.add_argument(
+        "--algorithm",
+        choices=["reinforce", "actor-critic"],
+        default="reinforce",
+        help="Choose between the original REINFORCE baseline and the new actor-critic variant.",
+    )
+    parser.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=DEFAULT_GAE_LAMBDA,
+        help="(actor-critic only) Generalized Advantage Estimation lambda parameter.",
+    )
+    parser.add_argument(
+        "--value-loss-coef",
+        type=float,
+        default=DEFAULT_VALUE_COEF,
+        help="(actor-critic only) Weight applied to the critic MSE loss.",
+    )
+    parser.add_argument(
+        "--policy-lr",
+        type=float,
+        default=None,
+        help="(actor-critic only) Override learning rate for policy parameters (defaults to --lr).",
+    )
+    parser.add_argument(
+        "--value-lr",
+        type=float,
+        default=None,
+        help="(actor-critic only) Override learning rate for critic parameters (defaults to --lr).",
+    )
+    parser.add_argument(
+        "--normalize-rewards",
+        action="store_true",
+        help="(actor-critic only) Normalize per-episode rewards before computing returns.",
+    )
+    parser.add_argument(
+        "--auto-entropy-target",
+        type=float,
+        default=None,
+        help="(actor-critic only) Target entropy value for automatic entropy-coefficient tuning.",
+    )
+    parser.add_argument(
+        "--auto-entropy-lr",
+        type=float,
+        default=DEFAULT_AUTO_ENTROPY_LR,
+        help="(actor-critic only) Learning rate used for entropy-coefficient adaptation.",
+    )
+    parser.add_argument(
+        "--min-entropy-coef",
+        type=float,
+        default=DEFAULT_MIN_ENTROPY_COEF,
+        help="(actor-critic only) Minimum allowable entropy coefficient during autotuning.",
     )
     parser.add_argument(
         "--episodes-per-log",
@@ -182,6 +245,12 @@ def parse_args() -> argparse.Namespace:
         help="If provided, write JSONL metrics to <log-dir>/<env>_train_log.jsonl.",
     )
     parser.add_argument(
+        "--log-label",
+        type=str,
+        default=None,
+        help="Optional suffix (e.g., 'scratch', 'transfer') appended to the log filename.",
+    )
+    parser.add_argument(
         "--summary-file",
         type=Path,
         default=None,
@@ -198,6 +267,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="Number of greedy evaluation rollouts to run after training (0 to skip).",
+    )
+    parser.add_argument(
+        "--eval-from-best",
+        action="store_true",
+        help="Reload the best-on-training checkpoint before evaluation (requires --checkpoint-dir).",
     )
     parser.add_argument(
         "--freeze-comm-head",
@@ -330,6 +404,15 @@ def _init_wandb_run(
         "env": env_name,
         "device": args.device,
         "seed": args.seed,
+        "language_arch": args.language_arch,
+        "algorithm": args.algorithm,
+        "gae_lambda": args.gae_lambda,
+        "value_loss_coef": args.value_loss_coef,
+        "policy_lr": args.policy_lr,
+        "value_lr": args.value_lr,
+        "normalize_rewards": args.normalize_rewards,
+        "auto_entropy_target": args.auto_entropy_target,
+        "auto_entropy_lr": args.auto_entropy_lr,
         **settings.as_dict(),
     }
 
@@ -446,6 +529,12 @@ def main() -> None:
     log_dir: Path | None = args.log_dir
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
+    log_label = args.log_label
+
+    def _log_path_for(env: str) -> Path:
+        assert log_dir is not None
+        suffix = f"_{log_label}" if log_label else ""
+        return log_dir / f"{env}_train_log{suffix}.jsonl"
 
     summary_records = []
     base_settings = _settings_from_args(args)
@@ -459,8 +548,8 @@ def main() -> None:
             )
         wandb_run = _init_wandb_run(args, env_name, settings)
         episode_cb = _episode_logger(wandb_run, env_name)
-        trainer = IndependentPolicyTrainer(
-            env_name,
+        trainer_kwargs = dict(
+            env_name=env_name,
             lr=settings.lr,
             gamma=settings.gamma,
             hidden_sizes=settings.hidden,
@@ -468,7 +557,22 @@ def main() -> None:
             entropy_coef=settings.entropy_coef,
             grad_clip=settings.grad_clip,
             baseline_momentum=settings.baseline_momentum,
+            language_arch=args.language_arch,
         )
+        if args.algorithm == "actor-critic":
+            trainer = ActorCriticTrainer(
+                **trainer_kwargs,
+                value_loss_coef=args.value_loss_coef,
+                gae_lambda=args.gae_lambda,
+                policy_lr=args.policy_lr,
+                value_lr=args.value_lr,
+                normalize_rewards=args.normalize_rewards,
+                entropy_target=args.auto_entropy_target,
+                entropy_lr=args.auto_entropy_lr,
+                min_entropy_coef=args.min_entropy_coef,
+            )
+        else:
+            trainer = IndependentPolicyTrainer(**trainer_kwargs)
         if args.init_from:
             loaded_paths = trainer.load_checkpoints(args.init_from)
             if loaded_paths:
@@ -501,9 +605,32 @@ def main() -> None:
             )
 
             if log_dir:
-                _write_history(log_dir / f"{env_name}_train_log.jsonl", history)
+                _write_history(_log_path_for(env_name), history)
 
             summary = _summarize_history(env_name, history)
+            if args.checkpoint_dir:
+                best_dir = args.checkpoint_dir / "best"
+                if best_dir.exists():
+                    summary["best_checkpoint_dir"] = str(best_dir)
+            eval_source = "final"
+            if (
+                args.eval_from_best
+                and args.checkpoint_dir
+                and args.eval_episodes > 0
+            ):
+                best_dir = Path(args.checkpoint_dir) / "best"
+                if best_dir.exists():
+                    trainer.load_checkpoints(best_dir)
+                    eval_source = "best"
+                    print(
+                        f"[{env_name}] Reloaded best checkpoint for evaluation from {best_dir}"
+                    )
+                else:
+                    print(
+                        f"[{env_name}] Requested eval-from-best but '{best_dir}' was not found; using final weights."
+                    )
+            summary["evaluation_source"] = eval_source
+
             eval_metrics = _evaluate_policy(
                 trainer, env_name, args.eval_episodes, args.seed
             )
@@ -512,6 +639,10 @@ def main() -> None:
 
             summary_records.append(summary)
             _print_summary(summary)
+            if summary.get("best_checkpoint_dir"):
+                print(
+                    f"[{env_name}] Best checkpoints saved under {summary['best_checkpoint_dir']}"
+                )
             if eval_metrics:
                 print(
                     f"[{env_name}] Evaluation mean return over {args.eval_episodes} episodes: "

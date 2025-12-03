@@ -1,7 +1,0 @@
-{"env": "simple_reference_v3", "episodes": 5, "best_mean_return": -102.87892579590641, "best_episode": 4, "final_mean_return": -202.66005870980283}
-{"env": "simple_world_comm_v3", "episodes": 5, "best_mean_return": -114.11516367412032, "best_episode": 5, "final_mean_return": -114.11516367412032}
-{"env": "simple_world_comm_v3", "episodes": 5, "best_mean_return": -323.4208406220781, "best_episode": 2, "final_mean_return": -462.7125296250436}
-{"env": "simple_reference_v3", "episodes": 800, "best_mean_return": -50.15701517081054, "best_episode": 763, "final_mean_return": -127.09533038156732, "evaluation_mean_return": -596.8651682180732}
-{"env": "simple_reference_v3", "episodes": 800, "best_mean_return": -54.89360624556714, "best_episode": 761, "final_mean_return": -104.47568160648613, "evaluation_mean_return": -563.728662808527}
-{"env": "simple_world_comm_v3", "episodes": 1200, "best_mean_return": 127.4437611602139, "best_episode": 759, "final_mean_return": 12.81032513957534, "evaluation_mean_return": 24.32443971821166}
-{"env": "simple_world_comm_v3", "episodes": 1200, "best_mean_return": 127.74022487375912, "best_episode": 1060, "final_mean_return": 11.46806220141039, "evaluation_mean_return": -57.90234771387077}

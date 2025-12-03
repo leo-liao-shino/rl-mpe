@@ -9,8 +9,9 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 
 try:  # optional progress bar support
     from tqdm.auto import tqdm as _tqdm
@@ -50,9 +51,52 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-comm-head", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--eval-from-best",
+        action="store_true",
+        help="Reload best checkpoints before evaluation for every job.",
+    )
+    parser.add_argument(
         "--reverse",
         action="store_true",
         help="Also run the reverse direction (target -> source).",
+    )
+    parser.add_argument(
+        "--language-arch",
+        choices=["simple", "encdec"],
+        default="simple",
+        help="Communication head architecture passed to every training job.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["disabled", "online", "offline", "dryrun"],
+        default="disabled",
+        help="Weights & Biases logging mode for all jobs (default: disabled).",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="rl-mpe",
+        help="Weights & Biases project name (default: rl-mpe).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="Optional Weights & Biases entity/organization.",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        default=None,
+        help="Optional group to collect runs under in W&B.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        nargs="*",
+        default=None,
+        help="Optional list of tags applied to every W&B run.",
+    )
+    parser.add_argument(
+        "--wandb-run-prefix",
+        default=None,
+        help="Optional prefix prepended to the auto-generated W&B run names.",
     )
     return parser.parse_args()
 
@@ -74,7 +118,16 @@ def build_job(
     training_plan: str,
     eval_episodes: int,
     device: str,
+    log_label: Optional[str] = None,
+    eval_from_best: bool = False,
     extra_args: Sequence[str] = (),
+    language_arch: str = "simple",
+    wandb_mode: str = "disabled",
+    wandb_project: str = "rl-mpe",
+    wandb_entity: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_tags: Optional[Sequence[str]] = None,
+    wandb_run_prefix: Optional[str] = None,
 ) -> TrainingJob:
     args = [
         f"--episodes={episodes}",
@@ -86,6 +139,28 @@ def build_job(
         f"--training-plan={training_plan}",
         f"--device={device}",
     ]
+    if log_label:
+        args.append(f"--log-label={log_label}")
+    if eval_from_best:
+        args.append("--eval-from-best")
+    if language_arch:
+        args.append(f"--language-arch={language_arch}")
+    if wandb_mode != "disabled":
+        args.append(f"--wandb-mode={wandb_mode}")
+        if wandb_project:
+            args.append(f"--wandb-project={wandb_project}")
+        if wandb_entity:
+            args.append(f"--wandb-entity={wandb_entity}")
+        if wandb_group:
+            args.append(f"--wandb-group={wandb_group}")
+        if wandb_tags:
+            args.append("--wandb-tags")
+            args.extend(wandb_tags)
+        run_name_parts = [wandb_run_prefix, label]
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        run_name = "-".join(part for part in run_name_parts if part) or label
+        run_name = f"{run_name}-{timestamp}"
+        args.append(f"--wandb-run-name={run_name}")
     args.extend(extra_args)
     return TrainingJob(label=label, env_name=env_name, args=list(args))
 
@@ -113,6 +188,15 @@ def main() -> None:
 
     jobs: List[TrainingJob] = []
 
+    wandb_kwargs = dict(
+        wandb_mode=args.wandb_mode,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_group=args.wandb_group,
+        wandb_tags=args.wandb_tags,
+        wandb_run_prefix=args.wandb_run_prefix,
+    )
+
     source_ckpt = _ensure_dirs(args.checkpoint_root / f"{args.source_env}_source")
     target_scratch_ckpt = _ensure_dirs(args.checkpoint_root / f"{args.target_env}_scratch")
     target_transfer_ckpt = _ensure_dirs(args.checkpoint_root / f"{args.target_env}_transfer")
@@ -129,6 +213,10 @@ def main() -> None:
             training_plan=args.training_plan_source,
             eval_episodes=args.eval_episodes,
             device=args.device,
+            log_label=f"{args.source_env}-source",
+            eval_from_best=args.eval_from_best,
+            language_arch=args.language_arch,
+            **wandb_kwargs,
         )
     )
 
@@ -144,10 +232,15 @@ def main() -> None:
             training_plan=args.training_plan_target,
             eval_episodes=args.eval_episodes,
             device=args.device,
+            log_label=f"{args.target_env}-scratch",
+            eval_from_best=args.eval_from_best,
+            language_arch=args.language_arch,
+            **wandb_kwargs,
         )
     )
 
-    transfer_args = [f"--init-comm-from={source_ckpt}"]
+    source_best_ckpt = source_ckpt / "best"
+    transfer_args = [f"--init-comm-from={source_best_ckpt}"]
     if args.freeze_comm_head:
         transfer_args.append("--freeze-comm-head")
     jobs.append(
@@ -162,7 +255,11 @@ def main() -> None:
             training_plan=args.training_plan_target,
             eval_episodes=args.eval_episodes,
             device=args.device,
+            log_label=f"{args.target_env}-transfer",
+            eval_from_best=args.eval_from_best,
             extra_args=transfer_args,
+            language_arch=args.language_arch,
+            **wandb_kwargs,
         )
     )
 
@@ -183,6 +280,10 @@ def main() -> None:
                 training_plan=args.training_plan_target,
                 eval_episodes=args.eval_episodes,
                 device=args.device,
+                log_label=f"{args.target_env}-source",
+                eval_from_best=args.eval_from_best,
+                language_arch=args.language_arch,
+                **wandb_kwargs,
             )
         )
         jobs.append(
@@ -197,9 +298,14 @@ def main() -> None:
                 training_plan=args.training_plan_source,
                 eval_episodes=args.eval_episodes,
                 device=args.device,
+                log_label=f"{args.source_env}-scratch",
+                eval_from_best=args.eval_from_best,
+                language_arch=args.language_arch,
+                **wandb_kwargs,
             )
         )
-        reverse_transfer_args = [f"--init-comm-from={reverse_ckpt}"]
+        reverse_best_ckpt = reverse_ckpt / "best"
+        reverse_transfer_args = [f"--init-comm-from={reverse_best_ckpt}"]
         if args.freeze_comm_head:
             reverse_transfer_args.append("--freeze-comm-head")
         jobs.append(
@@ -214,7 +320,11 @@ def main() -> None:
                 training_plan=args.training_plan_source,
                 eval_episodes=args.eval_episodes,
                 device=args.device,
+                log_label=f"{args.source_env}-transfer",
+                eval_from_best=args.eval_from_best,
                 extra_args=reverse_transfer_args,
+                language_arch=args.language_arch,
+                **wandb_kwargs,
             )
         )
 
