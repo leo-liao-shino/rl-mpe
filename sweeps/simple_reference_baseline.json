@@ -1,0 +1,25 @@
+{
+  "name": "simple_reference_baseline",
+  "description": "Baseline hyperparameter sweep for PettingZoo simple_reference_v3",
+  "method": "bayes",
+  "metric": {
+    "name": "summary/best_mean_return",
+    "goal": "maximize"
+  },
+  "parameters": {
+    "episodes": {"values": [600, 800, 1000]},
+    "lr": {"values": [0.0001, 0.0003, 0.001]},
+    "entropy_coef": {"values": [0.0025, 0.005, 0.01]},
+    "baseline_momentum": {"values": [0.9, 0.95, 0.99]},
+    "grad_clip": {"values": [0.5, 1.0]},
+    "hidden_spec": {
+      "values": [
+        "256,256",
+        "128,128",
+        "64,64",
+        "32,32"
+      ]
+    },
+    "seed": {"values": [0, 1, 2]}
+  }
+}
