@@ -135,6 +135,75 @@ class PolicyNetwork(nn.Module):
         return PolicyOutput(move_dist=move_dist, comm_dist=comm_dist)
 
 
+class FlatPolicyNetwork(nn.Module):
+    """Baseline MLP policy with a single flat action head (no separate comm/move)."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        action_dim: int,
+        hidden_sizes: Iterable[int],
+    ) -> None:
+        super().__init__()
+        layers: List[nn.Module] = []
+        prev = input_dim
+        for hidden in hidden_sizes:
+            layers.append(nn.Linear(prev, hidden))
+            layers.append(nn.ReLU())
+            prev = hidden
+        self.body = nn.Sequential(*layers) if layers else nn.Identity()
+        self.action_head = nn.Linear(prev, action_dim)
+        self.action_dim = action_dim
+        # For compatibility with checkpoint loading code
+        self.move_dim = action_dim
+        self.comm_dim = 0
+        self.comm_encoder = None
+        self.comm_head = None
+        self.comm_decoder = None
+
+    def forward(self, x: torch.Tensor) -> PolicyOutput:
+        hidden = self.body(x)
+        action_logits = self.action_head(hidden)
+        action_dist = Categorical(logits=action_logits)
+        # Return the flat distribution as move_dist, no comm_dist
+        return PolicyOutput(move_dist=action_dist, comm_dist=None)
+
+
+class FlatActorCriticNetwork(nn.Module):
+    """Baseline actor-critic with a single flat action head (no separate comm/move)."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        action_dim: int,
+        hidden_sizes: Iterable[int],
+    ) -> None:
+        super().__init__()
+        layers: List[nn.Module] = []
+        prev = input_dim
+        for hidden in hidden_sizes:
+            layers.append(nn.Linear(prev, hidden))
+            layers.append(nn.ReLU())
+            prev = hidden
+        self.body = nn.Sequential(*layers) if layers else nn.Identity()
+        self.action_head = nn.Linear(prev, action_dim)
+        self.value_head = nn.Linear(prev, 1)
+        self.action_dim = action_dim
+        # For compatibility
+        self.move_dim = action_dim
+        self.comm_dim = 0
+        self.comm_encoder = None
+        self.comm_head = None
+        self.comm_decoder = None
+
+    def forward(self, x: torch.Tensor) -> ActorCriticOutput:
+        hidden = self.body(x)
+        action_logits = self.action_head(hidden)
+        action_dist = Categorical(logits=action_logits)
+        value = self.value_head(hidden).squeeze(-1)
+        return ActorCriticOutput(move_dist=action_dist, comm_dist=None, value=value)
+
+
 @dataclass
 class EpisodeStats:
     episode: int
@@ -162,6 +231,7 @@ class IndependentPolicyTrainer:
         baseline_momentum: Optional[float] = 0.95,
         language_width: int = 128,
         language_arch: str = "simple",
+        flat_action_space: bool = False,
     ) -> None:
         if env_name not in PRESET_SPECS:
             raise KeyError(
@@ -179,6 +249,7 @@ class IndependentPolicyTrainer:
         self.baseline_momentum = baseline_momentum
         self.language_width = language_width
         self.language_arch = language_arch
+        self.flat_action_space = flat_action_space
 
         self.models: Dict[str, PolicyNetwork] = {}
         self.optimizers: Dict[str, torch.optim.Optimizer] = {}
@@ -342,11 +413,18 @@ class IndependentPolicyTrainer:
 
             traits = agent_traits.get(agent, None)
             silent = bool(getattr(traits, "silent", False)) if traits else False
-            comm_dim = world_dim_c if (world_dim_c > 0 and not silent) else 0
-            if comm_dim > 0:
-                move_dim = max(1, action_dim // comm_dim)
-            else:
+            
+            # Flat action space: treat entire action space as single head
+            if self.flat_action_space:
+                comm_dim = 0
                 move_dim = action_dim
+            else:
+                comm_dim = world_dim_c if (world_dim_c > 0 and not silent) else 0
+                if comm_dim > 0:
+                    move_dim = max(1, action_dim // comm_dim)
+                else:
+                    move_dim = action_dim
+                    
             layout = AgentActionLayout(move_dim=move_dim, comm_dim=comm_dim)
             if layout.action_space_n != action_dim:
                 raise ValueError(
@@ -354,14 +432,22 @@ class IndependentPolicyTrainer:
                 )
             self.action_layouts[agent] = layout
 
-            model = PolicyNetwork(
-                obs_dim,
-                move_dim,
-                comm_dim,
-                self.hidden_sizes,
-                language_width=self.language_width,
-                language_arch=self.language_arch,
-            ).to(self.device)
+            # Use flat network or structured network based on flag
+            if self.flat_action_space:
+                model = FlatPolicyNetwork(
+                    obs_dim,
+                    action_dim,
+                    self.hidden_sizes,
+                ).to(self.device)
+            else:
+                model = PolicyNetwork(
+                    obs_dim,
+                    move_dim,
+                    comm_dim,
+                    self.hidden_sizes,
+                    language_width=self.language_width,
+                    language_arch=self.language_arch,
+                ).to(self.device)
             optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
             self.models[agent] = model
             self.optimizers[agent] = optimizer
@@ -650,6 +736,7 @@ class ActorCriticTrainer(IndependentPolicyTrainer):
         baseline_momentum: Optional[float] = None,
         language_width: int = 128,
         language_arch: str = "simple",
+        flat_action_space: bool = False,
         value_loss_coef: float = 0.5,
         gae_lambda: float = 0.95,
         policy_lr: Optional[float] = None,
@@ -684,6 +771,7 @@ class ActorCriticTrainer(IndependentPolicyTrainer):
             baseline_momentum=baseline_momentum,
             language_width=language_width,
             language_arch=language_arch,
+            flat_action_space=flat_action_space,
         )
 
     def _initialize_models(self) -> None:  # type: ignore[override]
@@ -710,11 +798,18 @@ class ActorCriticTrainer(IndependentPolicyTrainer):
 
             traits = agent_traits.get(agent, None)
             silent = bool(getattr(traits, "silent", False)) if traits else False
-            comm_dim = world_dim_c if (world_dim_c > 0 and not silent) else 0
-            if comm_dim > 0:
-                move_dim = max(1, action_dim // comm_dim)
-            else:
+            
+            # Flat action space: treat entire action space as single head
+            if self.flat_action_space:
+                comm_dim = 0
                 move_dim = action_dim
+            else:
+                comm_dim = world_dim_c if (world_dim_c > 0 and not silent) else 0
+                if comm_dim > 0:
+                    move_dim = max(1, action_dim // comm_dim)
+                else:
+                    move_dim = action_dim
+                    
             layout = AgentActionLayout(move_dim=move_dim, comm_dim=comm_dim)
             if layout.action_space_n != action_dim:
                 raise ValueError(
@@ -722,14 +817,22 @@ class ActorCriticTrainer(IndependentPolicyTrainer):
                 )
             self.action_layouts[agent] = layout
 
-            model = ActorCriticPolicyNetwork(
-                obs_dim,
-                move_dim,
-                comm_dim,
-                self.hidden_sizes,
-                language_width=self.language_width,
-                language_arch=self.language_arch,
-            ).to(self.device)
+            # Use flat network or structured network based on flag
+            if self.flat_action_space:
+                model = FlatActorCriticNetwork(
+                    obs_dim,
+                    action_dim,
+                    self.hidden_sizes,
+                ).to(self.device)
+            else:
+                model = ActorCriticPolicyNetwork(
+                    obs_dim,
+                    move_dim,
+                    comm_dim,
+                    self.hidden_sizes,
+                    language_width=self.language_width,
+                    language_arch=self.language_arch,
+                ).to(self.device)
             policy_params: List[nn.Parameter] = []
             value_params: List[nn.Parameter] = []
             for name, param in model.named_parameters():

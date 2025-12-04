@@ -133,6 +133,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Architecture for the communication head. 'encdec' adds a decoder MLP before logits.",
     )
     parser.add_argument(
+        "--flat-action-space",
+        action="store_true",
+        help="Use a flat action head (no separate move/comm) as a baseline comparison.",
+    )
+    parser.add_argument(
         "--entropy-coef",
         type=float,
     default=None,
@@ -661,6 +666,7 @@ def run_training(args: argparse.Namespace, *, wandb_run=None) -> List[dict]:
             grad_clip=settings.grad_clip,
             baseline_momentum=settings.baseline_momentum,
             language_arch=args.language_arch,
+            flat_action_space=args.flat_action_space,
         )
         if args.algorithm == "actor-critic":
             trainer = ActorCriticTrainer(

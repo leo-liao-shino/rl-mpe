@@ -112,7 +112,10 @@ def _build_training_argv(
     argv: List[str] = [script_args.env]
     argv.extend(["--device", script_args.device])
     argv.extend(["--training-plan", script_args.training_plan])
-    argv.extend(["--algorithm", script_args.algorithm])
+    
+    # Algorithm can come from config (sweep) or script args (fallback)
+    algorithm = config.get("algorithm", script_args.algorithm)
+    argv.extend(["--algorithm", str(algorithm)])
     argv.extend(["--language-arch", script_args.language_arch])
     argv.extend(["--episodes-per-log", str(script_args.episodes_per_log)])
     argv.extend(["--eval-episodes", str(script_args.eval_episodes)])
@@ -122,6 +125,23 @@ def _build_training_argv(
     argv.extend(["--grad-clip", str(config.get("grad_clip"))])
     argv.extend(["--episodes", str(config.get("episodes"))])
     argv.extend(["--seed", str(config.get("seed", 0))])
+    
+    # Actor-critic specific parameters from sweep config
+    if config.get("gae_lambda") is not None:
+        argv.extend(["--gae-lambda", str(config.get("gae_lambda"))])
+    if config.get("value_loss_coef") is not None:
+        argv.extend(["--value-loss-coef", str(config.get("value_loss_coef"))])
+    if config.get("normalize_rewards"):
+        argv.append("--normalize-rewards")
+    if config.get("policy_lr") is not None:
+        argv.extend(["--policy-lr", str(config.get("policy_lr"))])
+    if config.get("value_lr") is not None:
+        argv.extend(["--value-lr", str(config.get("value_lr"))])
+    
+    # Flat action space baseline flag
+    if config.get("flat_action_space"):
+        argv.append("--flat-action-space")
+    
     hidden_spec = config.get("hidden_spec")
     if hidden_spec:
         hidden_layers = _parse_hidden_spec(str(hidden_spec))
