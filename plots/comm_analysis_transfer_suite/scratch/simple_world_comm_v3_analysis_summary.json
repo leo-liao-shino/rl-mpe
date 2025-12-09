@@ -1,0 +1,33 @@
+{
+  "env": "simple_world_comm_v3",
+  "episodes": 100,
+  "total_messages": 60000,
+  "usage_stats": {
+    "message_counts": {
+      "0": 34495,
+      "3": 25413,
+      "2": 92
+    },
+    "message_probs": {
+      "0": 0.5749166666666666,
+      "3": 0.42355,
+      "2": 0.0015333333333333334
+    },
+    "entropy": 0.9983956150474168,
+    "max_entropy": 1.584962500721156,
+    "entropy_ratio": 0.6299174993686905,
+    "num_unique_messages": 3
+  },
+  "correlation_stats": {
+    "message_success_rates": {
+      "0": 0.93,
+      "3": 0.93,
+      "2": 1.0
+    },
+    "message_avg_returns": {
+      "0": 269.0989285086276,
+      "3": 269.0989285086276,
+      "2": 525.6864495905702
+    }
+  }
+}
