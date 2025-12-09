@@ -40,6 +40,11 @@ class TrainingSettings:
     entropy_coef: float
     grad_clip: Optional[float]
     baseline_momentum: Optional[float]
+    # Actor-critic specific settings
+    algorithm: str = "actor-critic"
+    gae_lambda: float = 0.95
+    value_loss_coef: float = 1.0
+    normalize_rewards: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -51,6 +56,10 @@ class TrainingSettings:
             "entropy_coef": self.entropy_coef,
             "grad_clip": self.grad_clip,
             "baseline_momentum": self.baseline_momentum,
+            "algorithm": self.algorithm,
+            "gae_lambda": self.gae_lambda,
+            "value_loss_coef": self.value_loss_coef,
+            "normalize_rewards": self.normalize_rewards,
         }
 
 
@@ -62,22 +71,22 @@ DEFAULT_LOG_INTERVAL = 10
 DEFAULT_ENTROPY_COEF = 0.01
 DEFAULT_GRAD_CLIP = 0.5
 DEFAULT_BASELINE = 0.95
-DEFAULT_GAE_LAMBDA = 0.95
-DEFAULT_VALUE_COEF = 0.5
+DEFAULT_GAE_LAMBDA = 0.98
+DEFAULT_VALUE_COEF = 1.0
 DEFAULT_AUTO_ENTROPY_LR = 1e-3
 DEFAULT_MIN_ENTROPY_COEF = 1e-4
 
 
 BEST_TRAINING_RECIPES = {
     "simple_reference_v3": TrainingSettings(
-        episodes=800,
-        lr=3e-4,
+        episodes=2500,
+        lr=5e-4,
         gamma=0.98,
         hidden=[256, 256],
         log_interval=20,
         entropy_coef=0.005,
         grad_clip=0.5,
-        baseline_momentum=0.99,
+        baseline_momentum=0.95,
     ),
     "simple_world_comm_v3": TrainingSettings(
         episodes=1200,
@@ -233,6 +242,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Directory containing checkpoints whose communication heads should seed training.",
     )
     parser.add_argument(
+        "--init-comm-encoder-from",
+        type=Path,
+        default=None,
+        help="Directory containing checkpoints whose comm_encoder (bottleneck) should seed training. "
+             "Useful for cross-environment transfer when comm_dim differs.",
+    )
+    parser.add_argument(
+        "--average-comm-encoder",
+        action="store_true",
+        help="Average comm_encoder weights from source agents (agent_0 and agent_1) and apply to all communicative agents.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -288,6 +309,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--freeze-comm-head",
         action="store_true",
         help="Keep communication heads fixed (useful when transferring language).",
+    )
+    parser.add_argument(
+        "--freeze-comm-encoder",
+        action="store_true",
+        help="Keep only comm_encoder fixed, allowing comm_head/decoder to adapt. "
+             "Useful after encoder-only transfer.",
     )
     parser.add_argument(
         "--freeze-move-head",
@@ -652,7 +679,8 @@ def run_training(args: argparse.Namespace, *, wandb_run=None) -> List[dict]:
         if args.training_plan == "best":
             print(
                 f"[{env_name}] Using tuned recipe: episodes={settings.episodes}, lr={settings.lr}, "
-                f"hidden={settings.hidden}"
+                f"hidden={settings.hidden}, algorithm={settings.algorithm}, "
+                f"gae_lambda={settings.gae_lambda}, normalize_rewards={settings.normalize_rewards}"
             )
         current_run = wandb_run or _init_wandb_run(args, env_name, settings)
         episode_cb = _episode_logger(current_run, env_name)
@@ -668,14 +696,20 @@ def run_training(args: argparse.Namespace, *, wandb_run=None) -> List[dict]:
             language_arch=args.language_arch,
             flat_action_space=args.flat_action_space,
         )
-        if args.algorithm == "actor-critic":
+        # Use algorithm from settings (recipe) or CLI override
+        algorithm = args.algorithm if args.algorithm else settings.algorithm
+        if algorithm == "actor-critic":
+            # Use actor-critic params from settings, with CLI overrides
+            gae_lambda = args.gae_lambda if args.gae_lambda is not None else settings.gae_lambda
+            value_loss_coef = args.value_loss_coef if args.value_loss_coef is not None else settings.value_loss_coef
+            normalize_rewards = args.normalize_rewards if args.normalize_rewards else settings.normalize_rewards
             trainer = ActorCriticTrainer(
                 **trainer_kwargs,
-                value_loss_coef=args.value_loss_coef,
-                gae_lambda=args.gae_lambda,
+                value_loss_coef=value_loss_coef,
+                gae_lambda=gae_lambda,
                 policy_lr=args.policy_lr,
                 value_lr=args.value_lr,
-                normalize_rewards=args.normalize_rewards,
+                normalize_rewards=normalize_rewards,
                 entropy_target=args.auto_entropy_target,
                 entropy_lr=args.auto_entropy_lr,
                 min_entropy_coef=args.min_entropy_coef,
@@ -696,6 +730,31 @@ def run_training(args: argparse.Namespace, *, wandb_run=None) -> List[dict]:
             if comm_paths:
                 summary = ", ".join(f"{agent}:{path.name}" for agent, path in comm_paths.items())
                 print(f"[{env_name}] Seeded comm heads -> {summary}")
+        if args.init_comm_encoder_from:
+            if args.average_comm_encoder:
+                encoder_paths = trainer.load_comm_encoder_average(
+                    args.init_comm_encoder_from, strict=False
+                )
+                if encoder_paths:
+                    summary = ", ".join(
+                        f"{agent}:{path.name}" for agent, path in encoder_paths.items()
+                    )
+                    print(
+                        f"[{env_name}] Seeded averaged comm_encoder from sources -> {summary}"
+                    )
+            else:
+                encoder_paths = trainer.load_checkpoints(
+                    args.init_comm_encoder_from, strict=False, component="comm_encoder"
+                )
+                if encoder_paths:
+                    summary = ", ".join(
+                        f"{agent}:{path.name}" for agent, path in encoder_paths.items()
+                    )
+                    print(f"[{env_name}] Seeded comm_encoder -> {summary}")
+        elif args.average_comm_encoder:
+            print(
+                f"[{env_name}] --average-comm-encoder requires --init-comm-encoder-from; flag ignored."
+            )
         warm_stats: Optional[Dict[str, SpeakerPretrainStats]] = None
         if args.warm_start_dataset:
             warm_stats = _run_warm_start_stage(env_name, trainer, args)
@@ -717,11 +776,17 @@ def run_training(args: argparse.Namespace, *, wandb_run=None) -> List[dict]:
                 if not provided_wandb and current_run is not None:
                     current_run.finish()
                 continue
-        if args.freeze_comm_head or args.freeze_move_head:
-            trainer.freeze_heads(move=args.freeze_move_head, comm=args.freeze_comm_head)
+        if args.freeze_comm_head or args.freeze_move_head or args.freeze_comm_encoder:
+            trainer.freeze_heads(
+                move=args.freeze_move_head,
+                comm=args.freeze_comm_head,
+                comm_encoder_only=args.freeze_comm_encoder,
+            )
             frozen = []
             if args.freeze_comm_head:
                 frozen.append("communication")
+            if args.freeze_comm_encoder:
+                frozen.append("comm_encoder")
             if args.freeze_move_head:
                 frozen.append("movement")
             print(f"[{env_name}] Freezing {' & '.join(frozen)} heads")

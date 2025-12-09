@@ -270,14 +270,18 @@ class IndependentPolicyTrainer:
         Args:
             checkpoint_dir: Directory containing files saved via `_save_checkpoint`.
             strict: When True, raise `FileNotFoundError` if any agent is missing.
-            component: Which parameters to load ("all" or "comm_head").
+            component: Which parameters to load ("all", "comm_head", or "comm_encoder").
+                - "all": Load entire model state dict.
+                - "comm_head": Load comm_encoder + comm_head/comm_decoder.
+                - "comm_encoder": Load only comm_encoder (useful for cross-env transfer
+                  when comm_dim differs between source and target).
 
         Returns:
             Mapping from agent name to the checkpoint path that was loaded.
         """
 
-        if component not in {"all", "comm_head"}:
-            raise ValueError("component must be 'all' or 'comm_head'")
+        if component not in {"all", "comm_head", "comm_encoder"}:
+            raise ValueError("component must be 'all', 'comm_head', or 'comm_encoder'")
 
         checkpoint_dir = Path(checkpoint_dir)
         if not checkpoint_dir.exists():
@@ -315,7 +319,44 @@ class IndependentPolicyTrainer:
                             f"[{self.env_name}] Skipping checkpoint for agent '{agent}' (shape mismatch: {exc})"
                         )
                         continue
-                else:  # comm_head only
+                elif component == "comm_encoder":
+                    # Load only the comm_encoder (bottleneck layer) - useful for cross-env
+                    # transfer when comm_dim differs between source and target
+                    if not hasattr(model, "comm_encoder") or model.comm_encoder is None:
+                        if strict:
+                            raise ValueError(
+                                f"Agent '{agent}' has no comm_encoder; cannot load encoder weights"
+                            )
+                        break
+                    current = model.state_dict()
+                    updated = False
+                    for key, value in state.items():
+                        if not key.startswith("comm_encoder"):
+                            continue
+                        if key not in current:
+                            continue
+                        if current[key].shape != value.shape:
+                            print(
+                                f"[{self.env_name}] Skipping '{key}' for agent '{agent}' (shape mismatch: {value.shape} -> {current[key].shape})"
+                            )
+                            continue
+                        current[key] = value
+                        updated = True
+                    if not updated:
+                        if strict:
+                            raise ValueError(
+                                f"Agent '{agent}' checkpoint '{candidate.name}' missing compatible comm_encoder weights"
+                            )
+                        continue
+                    try:
+                        model.load_state_dict(current)
+                        print(f"[{self.env_name}] Loaded comm_encoder for agent '{agent}' from {candidate.name}")
+                    except RuntimeError as exc:
+                        print(
+                            f"[{self.env_name}] Skipping comm_encoder load for agent '{agent}' (shape mismatch: {exc})"
+                        )
+                        continue
+                else:  # comm_head: load encoder + head/decoder
                     comm_modules = [
                         getattr(model, "comm_head", None),
                         getattr(model, "comm_decoder", None),
@@ -373,7 +414,120 @@ class IndependentPolicyTrainer:
 
         return loaded
 
-    def freeze_heads(self, *, move: bool = False, comm: bool = False) -> None:
+    def load_comm_encoder_average(
+        self,
+        checkpoint_dir: Path,
+        *,
+        source_agents: Iterable[str] = ("agent_0", "agent_1"),
+        strict: bool = True,
+    ) -> Dict[str, Path]:
+        """Average comm_encoder weights across source agents and load into all communicative agents."""
+
+        checkpoint_dir = Path(checkpoint_dir)
+        if not checkpoint_dir.exists():
+            raise FileNotFoundError(f"Checkpoint directory '{checkpoint_dir}' does not exist")
+
+        episode_pattern = re.compile(r"_ep(\d+)\.pt$")
+
+        def _episode_num(path: Path) -> int:
+            match = episode_pattern.search(path.name)
+            return int(match.group(1)) if match else -1
+
+        loaded_sources: Dict[str, Path] = {}
+        encoder_sums: Dict[str, torch.Tensor] = {}
+        encoder_counts = 0
+
+        for src_agent in source_agents:
+            matches = sorted(
+                checkpoint_dir.glob(f"*_{src_agent}_ep*.pt"),
+                key=lambda p: (_episode_num(p), p.stat().st_mtime),
+                reverse=True,
+            )
+            if not matches:
+                if strict:
+                    raise FileNotFoundError(
+                        f"No checkpoint files for source agent '{src_agent}' in '{checkpoint_dir}'"
+                    )
+                continue
+
+            candidate = matches[0]
+            state = torch.load(candidate, map_location=self.device)
+            encoder_keys = [k for k in state.keys() if k.startswith("comm_encoder")]
+            if not encoder_keys:
+                if strict:
+                    raise ValueError(
+                        f"Checkpoint '{candidate.name}' for '{src_agent}' has no comm_encoder weights"
+                    )
+                continue
+
+            if not encoder_sums:
+                for k in encoder_keys:
+                    encoder_sums[k] = state[k].clone()
+            else:
+                for k in encoder_keys:
+                    if k not in encoder_sums:
+                        if strict:
+                            raise ValueError(
+                                f"Key '{k}' missing in accumulated encoder when adding '{candidate.name}'"
+                            )
+                        continue
+                    if encoder_sums[k].shape != state[k].shape:
+                        if strict:
+                            raise ValueError(
+                                f"Shape mismatch for '{k}' while averaging: {state[k].shape} vs {encoder_sums[k].shape}"
+                            )
+                        continue
+                    encoder_sums[k] += state[k]
+
+            encoder_counts += 1
+            loaded_sources[src_agent] = candidate
+
+        if encoder_counts == 0:
+            raise RuntimeError(
+                "No comm_encoder weights were collected for averaging; check source_agents and checkpoint_dir"
+            )
+
+        averaged_encoder = {k: v / float(encoder_counts) for k, v in encoder_sums.items()}
+
+        for agent, model in self.models.items():
+            if not hasattr(model, "comm_encoder") or model.comm_encoder is None:
+                continue
+
+            current = model.state_dict()
+            updated = False
+            for key, value in averaged_encoder.items():
+                if key not in current:
+                    continue
+                if current[key].shape != value.shape:
+                    if strict:
+                        raise ValueError(
+                            f"Shape mismatch applying averaged encoder to '{agent}': {value.shape} vs {current[key].shape}"
+                        )
+                    continue
+                current[key] = value.clone()
+                updated = True
+
+            if not updated and strict:
+                raise ValueError(f"No compatible comm_encoder params found for agent '{agent}'")
+
+            model.load_state_dict(current)
+            print(
+                f"[{self.env_name}] Loaded averaged comm_encoder into agent '{agent}' from {len(loaded_sources)} sources"
+            )
+
+        return loaded_sources
+
+    def freeze_heads(
+        self, *, move: bool = False, comm: bool = False, comm_encoder_only: bool = False
+    ) -> None:
+        """Freeze specific model components to prevent gradient updates.
+
+        Args:
+            move: Freeze movement head.
+            comm: Freeze entire communication module (encoder + head/decoder).
+            comm_encoder_only: Freeze only the comm_encoder (bottleneck), leaving
+                comm_head/comm_decoder trainable. Useful after encoder-only transfer.
+        """
         for model in self.models.values():
             if move:
                 for param in model.move_head.parameters():
@@ -387,6 +541,11 @@ class IndependentPolicyTrainer:
                         param.requires_grad = False
                 if hasattr(model, "comm_head") and model.comm_head is not None:
                     for param in model.comm_head.parameters():
+                        param.requires_grad = False
+            elif comm_encoder_only and getattr(model, "comm_dim", 0) > 0:
+                # Freeze only the encoder, leave head/decoder trainable
+                if hasattr(model, "comm_encoder") and model.comm_encoder is not None:
+                    for param in model.comm_encoder.parameters():
                         param.requires_grad = False
 
     def _initialize_models(self) -> None:

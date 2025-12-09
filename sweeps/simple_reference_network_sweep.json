@@ -1,0 +1,31 @@
+{
+  "name": "simple_reference_network_sweep",
+  "description": "Network architecture sweep for simple_reference_v3 - exploring deeper and wider networks",
+  "method": "grid",
+  "metric": {
+    "name": "summary/best_mean_return",
+    "goal": "maximize"
+  },
+  "parameters": {
+    "algorithm": {"value": "actor-critic"},
+    "episodes": {"value": 2500},
+    "lr": {"value": 0.0005},
+    "entropy_coef": {"value": 0.005},
+    "baseline_momentum": {"value": 0.95},
+    "grad_clip": {"value": 0.5},
+    "gae_lambda": {"value": 0.95},
+    "value_loss_coef": {"value": 1.0},
+    "normalize_rewards": {"value": true},
+    "hidden_spec": {
+      "values": [
+        "256,256",
+        "512,512",
+        "128,128,128",
+        "256,256,256",
+        "512,256,128",
+        "256,128,64",
+        "512,256"
+      ]
+    }
+  }
+}
